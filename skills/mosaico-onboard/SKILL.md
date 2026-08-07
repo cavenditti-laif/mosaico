@@ -1,6 +1,6 @@
 ---
 name: mosaico-onboard
-description: Bootstrap a project from no Mosaico installation to a verified daemon and client connection. Use when a user says "start using Mosaico", "set up Mosaico", "install Mosaico", "onboard this project to Mosaico", or asks for a first working Mosaico integration in Codex or Claude.
+description: Bootstrap a project from no Mosaico installation to a verified daemon and client connection. Use when a user says "start using Mosaico", "set up Mosaico", "install Mosaico", "onboard this project to Mosaico", or asks for a first working Mosaico integration.
 ---
 
 # Mosaico Onboard
