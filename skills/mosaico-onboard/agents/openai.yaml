@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mosaico Onboard"
+  short_description: "Set up Mosaico from zero to first connection"
+  default_prompt: "Use $mosaico-onboard to start using Mosaico in this project."
