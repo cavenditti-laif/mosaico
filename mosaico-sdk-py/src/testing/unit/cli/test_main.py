@@ -17,6 +17,7 @@ class TestAppEntrypoint:
         assert result.exit_code == 0
         assert "Mosaico CLI" in result.output
         assert "profile" in result.output
+        assert "ai" in result.output
         assert "sequence" in result.output
         assert "topic" in result.output
         assert "doctor" in result.output
@@ -60,7 +61,7 @@ class TestMainCallback:
 class TestSubcommandHelp:
     @pytest.mark.parametrize(
         "subcommand",
-        ["profile", "sequence", "topic", "extension"],
+        ["profile", "ai", "sequence", "topic", "extension"],
     )
     def test_subcommand_help(self, subcommand):
         result = runner.invoke(app, [subcommand, "--help"])
