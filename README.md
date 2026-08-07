@@ -67,8 +67,18 @@ The transition from classical robotics to Physical AI represents a fundamental s
 
 Mosaico’s [ML module](https://docs.mosaico.dev/python-sdk/SDK/bridges/ml/) automates this tedious *data plumbing*. It ingests raw, unsynchronized data and transforms it on the fly into the aligned, flattened formats ready for model training, eliminating the need for massive intermediate CSV files.
 
+## Quickstart with an AI coding tool
+
+Never used Mosaico? Nothing to install first. Paste this into Codex, Claude Code, or any agent that can fetch a URL:
+
+```text
+Read https://docs.mosaico.dev/start.md and follow it to spin up Mosaico in this project.
+```
+
+That page is a self-contained runbook: start the daemon, install the client, configure a profile, verify with a read-only query. Run `mosaico ai init` afterwards to leave the guidance in your `AGENTS.md` / `CLAUDE.md` so later sessions start with it.
+
 ## Documentation
-For a comprehensive description, please visit our [documentation](https://docs.mosaico.dev). If you are building with AI, you can find specialized technical guides in the [Agent-ready](https://docs.mosaico.dev/llms-full.txt) section.
+For a comprehensive description, please visit our [documentation](https://docs.mosaico.dev). If you are building with AI, use the navigable [`llms.txt`](https://docs.mosaico.dev/llms.txt) index and its linked pages as the source of truth.
 
 ### Cite Us
 

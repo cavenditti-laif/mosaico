@@ -1,0 +1,88 @@
+# Python SDK and CLI instructions
+
+These instructions extend the repository-level `AGENTS.md`.
+
+## CLI contracts
+
+- Put built-in commands in `src/mosaicolabs_cli/commands/` and register them in `main.py`.
+- Keep profile resolution in `MosaicoProfile`; do not duplicate precedence rules in commands.
+- Send human diagnostics to stderr when stdout is reserved for structured or piped data.
+- Never serialize API-key values. Expose only a boolean such as `api_key_configured`.
+- JSON collection output must include `schema_version`. JSON Lines emits one complete object per line.
+- Avoid spinners, colors, headings, or explanatory prose in CSV, JSON, and JSON Lines output.
+- Preserve non-interactive operation for automation and AI agents.
+
+## Tests
+
+- Unit CLI tests live in `src/testing/unit/cli/` and use `typer.testing.CliRunner`.
+- Mock network and filesystem boundaries in unit tests.
+- Add a test for redaction whenever configuration or authentication data is involved.
+- Cover both terminal-friendly behavior and at least one structured-output mode.
+
+## Security
+
+- Write local configuration with owner-only permissions on POSIX systems.
+- Treat discovered `mosaico-*` extensions as an external trust boundary.
+- Do not forward credentials to a new subprocess or plugin without an explicit, documented permission model.
+
+<!-- mosaico-ai:start -->
+# Mosaico guide for AI coding systems
+
+Use this guide when adding Mosaico to the current project. Inspect the project and
+its dependency manager before changing files. Prefer the smallest read-only
+connection check before implementing ingestion or queries.
+
+## Source of truth
+
+- Zero-to-first-query runbook: https://docs.mosaico.dev/start.md
+- Agent-navigable documentation index: https://docs.mosaico.dev/llms.txt
+- Human-facing documentation: https://docs.mosaico.dev
+- Python SDK package: `mosaicolabs`
+- CLI package extra: `mosaicolabs[cli]`
+
+Treat `llms.txt` and the documentation pages it links to as the source of truth
+for current Mosaico behavior. Navigate to the relevant linked page before
+planning an integration. Do not invent SDK methods, topic schemas, profile names,
+host names, ports, or authentication requirements.
+
+## First-run workflow
+
+1. Identify the language, package manager, and existing Mosaico integration.
+2. Check whether the CLI is available. If it is missing, propose the installation
+   command that matches the project's package manager. For Python, the package is
+   `mosaicolabs[cli]`.
+3. Determine whether a `mosaicod` daemon is already reachable. No client call
+   succeeds without one. If there is no daemon to connect to, follow
+   https://docs.mosaico.dev/start.md, which contains the local development
+   compose file and the startup sequence. Do not overwrite an existing
+   `compose.yaml` without asking.
+4. Run `mosaico doctor --output json`. Read `schema_version`, `status`, and
+   `checks`; do not scrape a formatted table.
+5. If no connection is configured, guide the developer through
+   `mosaico profile add <name>` or the documented `MOSAICO_*` environment
+   variables. Do not ask them to paste a secret into chat or source code.
+6. Once diagnostics pass, use structured CLI output to inspect available data,
+   starting with `mosaico sequence ls --output json`.
+7. Add and run the smallest read-only SDK example. Explain the result before
+   proposing writes, ingestion, schema changes, or production configuration.
+
+## Safety and compatibility
+
+- Never print, commit, echo, or serialize API-key values. Prefer
+  `MOSAICO_API_KEY` for credentials supplied at runtime.
+- Treat `--output json` and `--output jsonl` as versioned interfaces. Inspect
+  `schema_version` and keep stdout machine-readable.
+- Confirm identifiers and ontology or topic schemas before writing data.
+- Preserve the project's error handling, lifecycle, and dependency conventions.
+- State which diagnostics, tests, and end-to-end behavior were actually run.
+
+## Starter request
+
+Treat "spin up Mosaico", "set up Mosaico", or "connect this project to Mosaico"
+as a request to run the first-run workflow above, in order, as:
+
+> Inspect the existing stack, start or locate a `mosaicod` daemon, run
+> machine-readable diagnostics, and implement the smallest read-only connection
+> example. Do not expose credentials or guess schemas. Explain each proposed
+> change and verify the result.
+<!-- mosaico-ai:end -->
