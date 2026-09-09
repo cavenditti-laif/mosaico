@@ -18,10 +18,9 @@ fn cast_topic_data(row: PgRow) -> Result<schema::TopicRecord, Error> {
         path_in_store: row.try_get("path_in_store")?,
         creation_unix_tstamp: row.try_get("creation_unix_tstamp")?,
         completion_unix_tstamp: row.try_get("completion_unix_tstamp")?,
-        chunks_number: row.try_get("chunks_number")?,
-        total_bytes: row.try_get("total_bytes")?,
         start_index_timestamp: row.try_get("start_index_timestamp")?,
         end_index_timestamp: row.try_get("end_index_timestamp")?,
+        optimization_end_unix_tstamp: row.try_get("optimization_end_unix_tstamp")?,
     })
 }
 
@@ -255,28 +254,29 @@ pub async fn topic_update_user_metadata(
     Ok(res)
 }
 
-pub async fn topic_update_system_info(
+pub async fn topic_update_index_timestamp_range(
     exe: &mut impl AsExec,
     loc: &types::TopicLocator,
-    system_info: &types::TopicDataInfo,
+    ts_range: types::TimestampRange,
 ) -> Result<schema::TopicRecord, Error> {
-    trace!("updating system info to `{:?}` for `{}`", system_info, loc);
+    trace!(
+        "updating index timestamp range to `{:?}` for topic `{}`",
+        ts_range, loc
+    );
     let res = sqlx::query_as!(
         schema::TopicRecord,
         r#"
             UPDATE topic_t
-            SET chunks_number = $1, total_bytes = $2, start_index_timestamp = $3, end_index_timestamp = $4
-            WHERE locator_name = $5
+            SET start_index_timestamp = $1, end_index_timestamp = $2
+            WHERE locator_name = $3
             RETURNING *
     "#,
-        system_info.chunks_number as i64,
-        system_info.total_bytes as i64,
-        system_info.timestamp_range.start.as_i64(),
-        system_info.timestamp_range.end.as_i64(),
+        ts_range.start.as_i64(),
+        ts_range.end.as_i64(),
         loc.to_string(),
     )
-        .fetch_one(exe.as_exec())
-        .await?;
+    .fetch_one(exe.as_exec())
+    .await?;
 
     Ok(res)
 }
@@ -328,6 +328,30 @@ pub async fn topic_update_path_in_store_if_null(
     .await?;
 
     Ok(res.rows_affected() != 0)
+}
+
+/// Updates optimization completion timestamp and path in store for the given [`topic_id`].
+pub async fn topic_optimization_complete(
+    exe: &mut impl AsExec,
+    topic_id: i32,
+    optimization_end_ts: i64,
+    path_in_store: types::TopicPathInStore,
+) -> Result<(), Error> {
+    trace!("store optimization completed for topic `{}`", topic_id);
+    sqlx::query!(
+        r#"
+            UPDATE topic_t
+            SET optimization_end_unix_tstamp = $1, path_in_store = $2
+            WHERE topic_id = $3
+    "#,
+        optimization_end_ts,
+        Some(String::from(path_in_store)),
+        topic_id,
+    )
+    .execute(exe.as_exec())
+    .await?;
+
+    Ok(())
 }
 
 pub async fn topic_delete_path_in_store(

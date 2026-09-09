@@ -22,6 +22,39 @@ pub const EPSILON: f64 = 1.0e-06;
 
 pub const MAX_BUFFERED_FUTURES: usize = 8;
 
+// MIN/MAX values admissible for grpc message size.
+pub const GRPC_MSG_MIN_SIZE_BYTES: usize = 4 * 1024 * 1024; // 4MB. Default grpc message size.
+pub const GRPC_MSG_MAX_SIZE_BYTES: usize = 128 * 1024 * 1024; // 128MB
+
+// Default values for Params.
+pub const DEFAULT_MAX_GRPC_MESSAGE_SIZE: usize = 50 * 1_000_000; // 50MB
+pub const DEFAULT_TARGET_MESSAGE_SIZE: usize = DEFAULT_MAX_GRPC_MESSAGE_SIZE / 2; // 25MB
+pub const DEFAULT_MAX_CONCURRENT_CHUNK_QUERIES: usize = 4;
+pub const DEFAULT_MAX_SIZE_PLAIN_LIST_EQ: usize = 1024;
+pub const DEFAULT_MAX_DB_CONNECTIONS: u32 = 19;
+pub const DEFAULT_PARQUET_IN_MEMORY_ENCODING_BUFFER_SIZE: usize = 70 * 1_000_000;
+pub const DEFAULT_MAX_BATCH_SIZE: usize = 8192;
+pub const DEFAULT_QUERY_ENGINE_MEMORY_POOL_SIZE: usize = 0; // No memory restriction.
+pub const DEFAULT_TLS_CERT_FILE: &str = "";
+pub const DEFAULT_TLS_PRIVATE_KEY_FILE: &str = "";
+pub const DEFAULT_STORE_ENDPOINT: &str = "";
+pub const DEFAULT_STORE_BUCKET: &str = "";
+pub const DEFAULT_STORE_SECRET_KEY: &str = "";
+pub const DEFAULT_STORE_ACCESS_KEY: &str = "";
+pub const DEFAULT_STORE_OPTIMIZER_MEMORY_POOL_SIZE: usize = 0;
+
+// Instance registry (see `mosaicod ps`). Not configurable: these are cheap, low-stakes
+// background-loop knobs not requiring a CLI flag or env var.
+
+/// Interval, in seconds, between instance-registry heartbeats emitted by long-running
+/// `mosaicod` processes (server, cleanup).
+pub const INSTANCE_HEARTBEAT_INTERVAL_SECS: u32 = 30;
+
+/// After this many seconds without a heartbeat, an instance's registry row is permanently
+/// deleted. Much larger than [`INSTANCE_STALE_THRESHOLD_SECS`] so a "stale" instance can still
+/// be inspected for a while before its row disappears.
+pub const INSTANCE_REGISTRY_EXPIRY_THRESHOLD_SECS: u32 = 7 * 86400;
+
 /// Module containing several file extensions
 pub mod ext {
     /// Json file extension
@@ -107,6 +140,80 @@ where
             _visibility: PhantomData,
         })
     }
+
+    /// Like [`Param::optional`], but the value may instead be provided via a
+    /// `<NAME>_FILE` environment variable pointing at a file containing it.
+    /// At most one of `<NAME>` or `<NAME>_FILE` may be set; setting both is an error.
+    /// If neither is set, `default` is used.
+    pub fn optional_or_file(name: &str, default: T) -> error::PublicResult<Param<T, V>>
+    where
+        T: std::str::FromStr,
+        <T as FromStr>::Err: std::fmt::Debug,
+    {
+        let value = match resolve_plain_or_file(name)? {
+            Some(raw) => raw.parse().map_err(|_| {
+                error::Error::invalid_configuration(name.to_owned(), "unable to parse".to_owned())
+            })?,
+            None => default,
+        };
+
+        Ok(Self {
+            value,
+            env: name.to_owned(),
+            _visibility: PhantomData,
+        })
+    }
+
+    /// Like [`Param::required`], but the value may instead be provided via a
+    /// `<NAME>_FILE` environment variable pointing at a file containing it.
+    /// Exactly one of `<NAME>` or `<NAME>_FILE` must be set: setting both, or neither, is an error.
+    pub fn required_or_file(name: &str) -> error::PublicResult<Param<T, V>>
+    where
+        T: std::str::FromStr,
+        <T as FromStr>::Err: std::fmt::Debug,
+    {
+        let raw = resolve_plain_or_file(name)?.ok_or_else(|| {
+            error::Error::invalid_configuration(
+                name.to_owned(),
+                format!("missing: set `{name}` or `{name}_FILE`"),
+            )
+        })?;
+
+        let value = raw.parse().map_err(|_| {
+            error::Error::invalid_configuration(name.to_owned(), "unable to parse".to_owned())
+        })?;
+
+        Ok(Self {
+            value,
+            env: name.to_owned(),
+            _visibility: PhantomData,
+        })
+    }
+}
+
+/// Resolves a value that may be set either directly via `<NAME>` or indirectly via
+/// `<NAME>_FILE` (a path to a file containing it, read and trailing-newline-trimmed).
+/// Returns `Ok(None)` if neither is set. Setting both is an error.
+fn resolve_plain_or_file(name: &str) -> error::PublicResult<Option<String>> {
+    let file_env = format!("{name}_FILE");
+
+    let plain = env::var(name).ok();
+    let file_path = env::var(&file_env).ok();
+
+    match (plain, file_path) {
+        (Some(_), Some(_)) => Err(error::Error::invalid_configuration(
+            name.to_owned(),
+            format!("`{name}` and `{file_env}` are mutually exclusive, set only one"),
+        ))?,
+        (Some(value), None) => Ok(Some(value)),
+        (None, Some(path)) => Ok(Some(
+            std::fs::read_to_string(&path)
+                .map_err(|e| error::Error::invalid_configuration(file_env, e.to_string()))?
+                .trim()
+                .to_owned(),
+        )),
+        (None, None) => Ok(None),
+    }
 }
 
 impl<T> std::fmt::Debug for Param<T, Hidden>
@@ -132,7 +239,7 @@ where
 pub struct Params {
     /// Maximum allowed message size (in bytes) by the gRPC protocol.
     ///
-    /// If you need to update this value be aware that this value is tipically
+    /// If you need to update this value be aware that it is usually
     /// smaller than [`Params::parquet_in_memory_encoding_buffer_size`].
     ///
     /// Defaults to 50 MB.
@@ -143,8 +250,9 @@ pub struct Params {
     /// message. If the resulting batch size exceeds the limit, it will be capped by
     /// [`Params::max_batch_size`].
     ///
-    /// Defaults to 25MB.
-    pub target_message_size: Param<usize>,
+    /// This param does not have a corresponding ENV var associated,
+    /// but it is directly set to half of [`Params::max_grpx_message_size`] instead.
+    pub target_message_size: usize,
 
     /// Maximum number of concurrent chunk queries during data catalog filtering.
     pub max_concurrent_chunk_queries: Param<usize>,
@@ -196,6 +304,13 @@ pub struct Params {
     /// Defaults to 0 (no limit).
     pub query_engine_memory_pool_size: Param<usize>,
 
+    /// Defines the amount of memory (in bytes) used by the store optimizer (DataFusion).
+    /// Set this value to a number greater than 0 to enforce a hard limit
+    /// on the memory allocated. Use this setting if mosaicod encounters OOM (Out Of Memory) errors.
+    ///
+    /// Defaults to 0 (no limit).
+    pub store_optimizer_memory_pool_size: Param<usize>,
+
     /// Size (in bytes) of the in-memory buffer used for encoding parquet data.
     ///
     /// Defaults to 75 MB
@@ -207,36 +322,76 @@ pub struct Params {
     /// Path of the `key.pem` file used as private key for TLS
     pub tls_private_key_file: Param<String>,
 
+    /// Database URL, without credentials (e.g. `postgresql://host:port/dbname`)
     pub db_url: Param<String>,
+
+    pub db_user: Param<String>,
+
+    /// May also be set via `MOSAICOD_DB_PASSWORD_FILE` (see [`Param::optional_or_file`])
+    pub db_password: Param<String, Hidden>,
 
     /// Maximum number of database connections in the pool
     pub max_db_connections: Param<u32>,
 
     pub store_endpoint: Param<String>,
     pub store_bucket: Param<String>,
+
+    /// May also be set via `MOSAICOD_STORE_SECRET_KEY_FILE` (see [`Param::optional_or_file`])
     pub store_secret_key: Param<String, Hidden>,
+
     pub store_access_key: Param<String>,
+}
+
+impl Params {
+    fn validate(&self) -> Result<(), error::Error> {
+        if self.max_batch_size.value == 0 {
+            Err(error::Error::invalid_configuration(
+                self.max_batch_size.env.clone(),
+                "must be greater than 0".to_owned(),
+            ))?;
+        }
+
+        if self.max_grpc_message_size.value < GRPC_MSG_MIN_SIZE_BYTES
+            || self.max_grpc_message_size.value > GRPC_MSG_MAX_SIZE_BYTES
+        {
+            let err_msg = format!(
+                "must be in the range: [{}, {}]",
+                GRPC_MSG_MIN_SIZE_BYTES, GRPC_MSG_MAX_SIZE_BYTES
+            );
+
+            Err(error::Error::invalid_configuration(
+                self.max_grpc_message_size.env.clone(),
+                err_msg,
+            ))?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Options for loading parameters from environment variables
 pub struct ParamsLoadOptions {
-    /// Avoid parsing `MOSICOD_DB_URL` env variable
-    pub skip_db_url: bool,
+    /// Avoid requiring the `MOSAICOD_DB_*` env variables
+    pub skip_db_config: bool,
 }
 
 #[allow(clippy::derivable_impls)]
 impl Default for ParamsLoadOptions {
     fn default() -> Self {
-        Self { skip_db_url: false }
+        Self {
+            skip_db_config: false,
+        }
     }
 }
 
 impl ParamsLoadOptions {
     /// Load parameters with options suitable for testing
     ///
-    /// This will skip the loading of database URL in the environment variables.
+    /// This will skip the loading of database connection settings from the environment variables.
     pub fn testing() -> Self {
-        Self { skip_db_url: true }
+        Self {
+            skip_db_config: true,
+        }
     }
 }
 
@@ -245,13 +400,28 @@ pub fn load_params_from_env(config: ParamsLoadOptions) -> error::PublicResult<()
         .expect("Unable to detect default parallelism, please define MOSAICOD_DEFAULT_PARALLELISM")
         .get();
 
+    let max_grpc_message_size = Param::optional(
+        "MOSAICOD_MAX_GRPC_MESSAGE_SIZE",
+        DEFAULT_MAX_GRPC_MESSAGE_SIZE,
+    );
+    let target_message_size = max_grpc_message_size.value / 2;
+
     let ev = Params {
         // general
-        max_grpc_message_size: Param::optional("MOSAICOD_MAX_GRPC_MESSAGE_SIZE", 50 * 1_000_000),
-        target_message_size: Param::optional("MOSAICOD_TARGET_MESSAGE_SIZE", 25 * 1_000_000),
-        max_concurrent_chunk_queries: Param::optional("MOSAICOD_MAX_CONCURRENT_CHUNK_QUERIES", 4),
-        max_size_plain_list_eq: Param::optional("MOSAICOD_MAX_SIZE_PLAIN_LIST_EQ", 1024),
-        max_db_connections: Param::optional("MOSAICOD_MAX_DB_CONNECTIONS", 10),
+        max_grpc_message_size,
+        target_message_size,
+        max_concurrent_chunk_queries: Param::optional(
+            "MOSAICOD_MAX_CONCURRENT_CHUNK_QUERIES",
+            DEFAULT_MAX_CONCURRENT_CHUNK_QUERIES,
+        ),
+        max_size_plain_list_eq: Param::optional(
+            "MOSAICOD_MAX_SIZE_PLAIN_LIST_EQ",
+            DEFAULT_MAX_SIZE_PLAIN_LIST_EQ,
+        ),
+        max_db_connections: Param::optional(
+            "MOSAICOD_MAX_DB_CONNECTIONS",
+            DEFAULT_MAX_DB_CONNECTIONS,
+        ),
         max_concurrent_writes: Param::optional(
             "MOSAICOD_MAX_CONCURRENT_WRITES",
             default_parallelism,
@@ -259,35 +429,66 @@ pub fn load_params_from_env(config: ParamsLoadOptions) -> error::PublicResult<()
         default_parallelism: Param::optional("MOSAICOD_DEFAULT_PARALLELISM", default_parallelism),
         parquet_in_memory_encoding_buffer_size: Param::optional(
             "MOSAICOD_PARQUET_IN_MEMORY_ENCODING_BUFFER_SIZE",
-            75 * 1_000_000,
+            DEFAULT_PARQUET_IN_MEMORY_ENCODING_BUFFER_SIZE,
         ),
-        max_batch_size: Param::optional("MOSAICOD_MAX_BATCH_SIZE", 8192),
-        query_engine_memory_pool_size: Param::optional("MOSAICOD_QUERY_ENGINE_MEMORY_POOL_SIZE", 0),
+        max_batch_size: Param::optional("MOSAICOD_MAX_BATCH_SIZE", DEFAULT_MAX_BATCH_SIZE),
+        query_engine_memory_pool_size: Param::optional(
+            "MOSAICOD_QUERY_ENGINE_MEMORY_POOL_SIZE",
+            DEFAULT_QUERY_ENGINE_MEMORY_POOL_SIZE,
+        ),
 
         // tls
-        tls_certificate_file: Param::optional("MOSAICOD_TLS_CERT_FILE", "".to_owned()),
-        tls_private_key_file: Param::optional("MOSAICOD_TLS_PRIVATE_KEY_FILE", "".to_owned()),
+        tls_certificate_file: Param::optional(
+            "MOSAICOD_TLS_CERT_FILE",
+            DEFAULT_TLS_CERT_FILE.to_owned(),
+        ),
+        tls_private_key_file: Param::optional(
+            "MOSAICOD_TLS_PRIVATE_KEY_FILE",
+            DEFAULT_TLS_PRIVATE_KEY_FILE.to_owned(),
+        ),
 
         // database
-        db_url: if config.skip_db_url {
+        db_url: if config.skip_db_config {
             Param::default()
         } else {
             Param::required("MOSAICOD_DB_URL")?
         },
+        db_user: if config.skip_db_config {
+            Param::default()
+        } else {
+            // Some databases do not require to specify a user for the connection.
+            Param::optional("MOSAICOD_DB_USER", String::new())
+        },
+        db_password: if config.skip_db_config {
+            Param::default()
+        } else {
+            // Some databases do not require to specify a password for the connection.
+            Param::optional_or_file("MOSAICOD_DB_PASSWORD", String::new())?
+        },
 
         // store
-        store_endpoint: Param::optional("MOSAICOD_STORE_ENDPOINT", "".to_owned()),
-        store_bucket: Param::optional("MOSAICOD_STORE_BUCKET", "".to_owned()),
-        store_secret_key: Param::optional("MOSAICOD_STORE_SECRET_KEY", "".to_owned()),
-        store_access_key: Param::optional("MOSAICOD_STORE_ACCESS_KEY", "".to_owned()),
+        store_endpoint: Param::optional(
+            "MOSAICOD_STORE_ENDPOINT",
+            DEFAULT_STORE_ENDPOINT.to_owned(),
+        ),
+        store_bucket: Param::optional("MOSAICOD_STORE_BUCKET", DEFAULT_STORE_BUCKET.to_owned()),
+        store_secret_key: Param::optional_or_file(
+            "MOSAICOD_STORE_SECRET_KEY",
+            DEFAULT_STORE_SECRET_KEY.to_owned(),
+        )?,
+        store_access_key: Param::optional(
+            "MOSAICOD_STORE_ACCESS_KEY",
+            DEFAULT_STORE_ACCESS_KEY.to_owned(),
+        ),
+
+        // store optimizer
+        store_optimizer_memory_pool_size: Param::optional(
+            "MOSAICOD_STORE_OPTIMIZER_MEMORY_POOL_SIZE",
+            DEFAULT_STORE_OPTIMIZER_MEMORY_POOL_SIZE,
+        ),
     };
 
-    if ev.max_batch_size.value == 0 {
-        Err(error::Error::invalid_configuration(
-            ev.max_batch_size.env.clone(),
-            "must be greater than 0".to_owned(),
-        ))?;
-    }
+    ev.validate()?;
 
     let _ = ENV.set(ev);
 
@@ -307,4 +508,226 @@ pub fn version() -> String {
         version.push_str("-devel");
     }
     version
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorKind;
+
+    fn param<T>(value: T) -> Param<T> {
+        Param {
+            env: "TEST_ENV_VAR".to_owned(),
+            value,
+            _visibility: PhantomData,
+        }
+    }
+
+    fn param_hidden<T>(value: T) -> Param<T, Hidden> {
+        Param {
+            env: "TEST_ENV_VAR".to_owned(),
+            value,
+            _visibility: PhantomData,
+        }
+    }
+
+    /// Builds a `Params` instance that passes `validate()`, so individual
+    /// fields can be overridden to exercise a single validation rule at a time.
+    fn valid_params() -> Params {
+        Params {
+            max_grpc_message_size: param(GRPC_MSG_MIN_SIZE_BYTES),
+            target_message_size: GRPC_MSG_MIN_SIZE_BYTES / 2,
+            max_concurrent_chunk_queries: param(DEFAULT_MAX_CONCURRENT_CHUNK_QUERIES),
+            max_size_plain_list_eq: param(DEFAULT_MAX_SIZE_PLAIN_LIST_EQ),
+            max_concurrent_writes: param(1),
+            max_batch_size: param(DEFAULT_MAX_BATCH_SIZE),
+            default_parallelism: param(1),
+            query_engine_memory_pool_size: param(DEFAULT_QUERY_ENGINE_MEMORY_POOL_SIZE),
+            parquet_in_memory_encoding_buffer_size: param(
+                DEFAULT_PARQUET_IN_MEMORY_ENCODING_BUFFER_SIZE,
+            ),
+            tls_certificate_file: param(DEFAULT_TLS_CERT_FILE.to_owned()),
+            tls_private_key_file: param(DEFAULT_TLS_PRIVATE_KEY_FILE.to_owned()),
+            db_url: param("".to_owned()),
+            db_user: param("".to_owned()),
+            db_password: param_hidden("".to_owned()),
+            max_db_connections: param(DEFAULT_MAX_DB_CONNECTIONS),
+            store_endpoint: param(DEFAULT_STORE_ENDPOINT.to_owned()),
+            store_bucket: param(DEFAULT_STORE_BUCKET.to_owned()),
+            store_secret_key: param_hidden(DEFAULT_STORE_SECRET_KEY.to_owned()),
+            store_access_key: param(DEFAULT_STORE_ACCESS_KEY.to_owned()),
+            store_optimizer_memory_pool_size: param(DEFAULT_STORE_OPTIMIZER_MEMORY_POOL_SIZE),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_valid_params() {
+        assert!(valid_params().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_batch_size() {
+        let mut params = valid_params();
+        params.max_batch_size = param(0);
+
+        let err = params.validate().unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::InvalidConfiguration(_)));
+    }
+
+    #[test]
+    fn validate_accepts_max_batch_size_of_one() {
+        let mut params = valid_params();
+        params.max_batch_size = param(1);
+
+        assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_max_grpc_message_size_below_min() {
+        let mut params = valid_params();
+        params.max_grpc_message_size = param(GRPC_MSG_MIN_SIZE_BYTES - 1);
+
+        let err = params.validate().unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::InvalidConfiguration(_)));
+    }
+
+    #[test]
+    fn validate_rejects_max_grpc_message_size_above_max() {
+        let mut params = valid_params();
+        params.max_grpc_message_size = param(GRPC_MSG_MAX_SIZE_BYTES + 1);
+
+        let err = params.validate().unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::InvalidConfiguration(_)));
+    }
+
+    #[test]
+    fn validate_accepts_max_grpc_message_size_at_bounds() {
+        let mut params = valid_params();
+
+        params.max_grpc_message_size = param(GRPC_MSG_MIN_SIZE_BYTES);
+        assert!(params.validate().is_ok());
+
+        params.max_grpc_message_size = param(GRPC_MSG_MAX_SIZE_BYTES);
+        assert!(params.validate().is_ok());
+    }
+
+    // SAFETY: each test below uses its own dedicated env var name, so concurrent
+    // test threads never observe or mutate each other's variables.
+
+    #[test]
+    fn optional_or_file_uses_plain_value_when_set() {
+        let name = "TEST_OPTIONAL_OR_FILE_PLAIN";
+        unsafe { env::set_var(name, "plain-value") };
+
+        let result = Param::<String>::optional_or_file(name, "default".to_owned());
+
+        unsafe { env::remove_var(name) };
+
+        assert_eq!(result.unwrap().value, "plain-value");
+    }
+
+    #[test]
+    fn optional_or_file_reads_and_trims_file_when_file_var_set() {
+        let name = "TEST_OPTIONAL_OR_FILE_FROM_FILE";
+        let file_env = format!("{name}_FILE");
+
+        let path = std::env::temp_dir().join("mosaicod_test_optional_or_file_secret");
+        std::fs::write(&path, " secret-from-file\n").unwrap();
+        unsafe { env::set_var(&file_env, path.to_str().unwrap()) };
+
+        let result = Param::<String>::optional_or_file(name, "default".to_owned());
+
+        unsafe { env::remove_var(&file_env) };
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.unwrap().value, "secret-from-file");
+    }
+
+    #[test]
+    fn optional_or_file_errors_when_both_set() {
+        let name = "TEST_OPTIONAL_OR_FILE_BOTH";
+        let file_env = format!("{name}_FILE");
+
+        unsafe { env::set_var(name, "plain-value") };
+        unsafe { env::set_var(&file_env, "/does/not/matter") };
+
+        let result = Param::<String>::optional_or_file(name, "default".to_owned());
+
+        unsafe { env::remove_var(name) };
+        unsafe { env::remove_var(&file_env) };
+
+        assert!(matches!(
+            result.unwrap_err().error().kind(),
+            ErrorKind::InvalidConfiguration(_)
+        ));
+    }
+
+    #[test]
+    fn optional_or_file_falls_back_to_default_when_neither_set() {
+        let name = "TEST_OPTIONAL_OR_FILE_NEITHER";
+
+        let result = Param::<String>::optional_or_file(name, "default".to_owned());
+
+        assert_eq!(result.unwrap().value, "default");
+    }
+
+    #[test]
+    fn required_or_file_uses_plain_value_when_set() {
+        let name = "TEST_REQUIRED_OR_FILE_PLAIN";
+        unsafe { env::set_var(name, "plain-value") };
+
+        let result = Param::<String>::required_or_file(name);
+
+        unsafe { env::remove_var(name) };
+
+        assert_eq!(result.unwrap().value, "plain-value");
+    }
+
+    #[test]
+    fn required_or_file_reads_and_trims_file_when_file_var_set() {
+        let name = "TEST_REQUIRED_OR_FILE_FROM_FILE";
+        let file_env = format!("{name}_FILE");
+
+        let path = std::env::temp_dir().join("mosaicod_test_required_or_file_secret");
+        std::fs::write(&path, "secret-from-file\n").unwrap();
+        unsafe { env::set_var(&file_env, path.to_str().unwrap()) };
+
+        let result = Param::<String>::required_or_file(name);
+
+        unsafe { env::remove_var(&file_env) };
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.unwrap().value, "secret-from-file");
+    }
+
+    #[test]
+    fn required_or_file_errors_when_both_set() {
+        let name = "TEST_REQUIRED_OR_FILE_BOTH";
+        let file_env = format!("{name}_FILE");
+
+        unsafe { env::set_var(name, "plain-value") };
+        unsafe { env::set_var(&file_env, "/does/not/matter") };
+
+        let result = Param::<String>::required_or_file(name);
+
+        unsafe { env::remove_var(name) };
+        unsafe { env::remove_var(&file_env) };
+
+        assert!(matches!(
+            result.unwrap_err().error().kind(),
+            ErrorKind::InvalidConfiguration(_)
+        ));
+    }
+
+    #[test]
+    fn required_or_file_errors_when_neither_set() {
+        let name = "TEST_REQUIRED_OR_FILE_NEITHER";
+
+        let result = Param::<String>::required_or_file(name);
+
+        assert!(matches!(
+            result.unwrap_err().error().kind(),
+            ErrorKind::InvalidConfiguration(_)
+        ));
+    }
 }

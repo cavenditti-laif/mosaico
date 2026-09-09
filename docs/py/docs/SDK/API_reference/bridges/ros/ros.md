@@ -3,11 +3,14 @@ title: ROS Bridge
 description: API Reference for ROS Bridge
 ---
 
-::: mosaicolabs.ros_bridge.ROSBridge
-::: mosaicolabs.ros_bridge.register_default_adapter
-::: mosaicolabs.ros_bridge.loader.ROSLoader
-::: mosaicolabs.ros_bridge.loader.LoaderErrorPolicy
-::: mosaicolabs.ros_bridge.ROSMessage
-::: mosaicolabs.ros_bridge.ROSInjectionConfig
-::: mosaicolabs.ros_bridge.RosbagInjector
-::: mosaicolabs.ros_bridge.ROSTypeRegistry
+::: mosaicolabs.bridges.ros.ROSBridge
+::: mosaicolabs.bridges.ros.register_default_adapter
+::: mosaicolabs.bridges.ros.loader.ROSLoader
+::: mosaicolabs.bridges.ros.loader.MosaicoLoader
+::: mosaicolabs.bridges.ros.ROSMessage
+::: mosaicolabs.bridges.ros.ROSInjectionConfig
+::: mosaicolabs.bridges.ros.RosbagInjector
+::: mosaicolabs.bridges.ros.ROSSequenceExtractor
+::: mosaicolabs.bridges.ros.ROSExtractorConfig
+::: mosaicolabs.bridges.ros.ROSTypeRegistry
+::: mosaicolabs.bridges.ros.RosSchemaMetadata

@@ -20,9 +20,8 @@ pub type TopicOntologyMetadata = types::TopicOntologyMetadata<marshal::JsonMetad
 #[derive(Clone)]
 pub struct TopicInfo {
     pub metadata: TopicMetadata,
-    // An empty topic can have no data info yet.
-    pub data_info: Option<types::TopicDataInfo>,
-    pub schema: SchemaRef,
+    pub data_info: types::TopicDataInfo,
+    pub time_window_info: Option<types::TopicTimeWindowInfo>,
 }
 
 pub struct TopicStreamingReadParams {
@@ -34,6 +33,7 @@ pub struct TopicStreamingReadParams {
 pub(super) mod internal {
     use super::*;
     use mosaicod_core::error::PublicError;
+    use mosaicod_core::types::TopicTimeWindowInfo;
 
     /// Creates [`TopicMetadata`] associated to the given [`topic_record`].
     pub async fn metadata(
@@ -53,15 +53,12 @@ pub(super) mod internal {
                 resource_locator: topic_record.locator(),
             },
             ontology_metadata: TopicOntologyMetadata {
-                properties: types::TopicOntologyProperties {
-                    serialization_format: topic_record
-                        .serialization_format()
-                        .ok_or_else(|| Error::MissingDbData("serialization_format".to_owned()))?,
-                    ontology_tag: topic_record.ontology_tag.clone(),
-                },
+                serialization_format: topic_record
+                    .serialization_format()
+                    .ok_or_else(|| Error::MissingDbData("serialization_format".to_owned()))?,
+                ontology_tag: topic_record.ontology_tag.clone(),
                 user_metadata: topic_record.user_metadata(),
             },
-            interval_props: None,
         })
     }
 
@@ -83,12 +80,11 @@ pub(super) mod internal {
         Ok(Status::Finalized)
     }
 
-    /// Computes metrics about the topic's stored data
-    /// (e.g. total size in bytes, first and last timestamps recorded in the topic)
-    pub async fn compute_data_info(
-        context: &Context,
+    /// Computes first and last timestamps recorded in the topic.
+    pub async fn compute_timestamp_range(
+        ts_engine: query::TimeseriesEngineRef,
         topic_record: &db::TopicRecord,
-    ) -> Result<types::TopicDataInfo> {
+    ) -> Result<types::TimestampRange> {
         let path_in_store = topic_record
             .path_in_store()
             .ok_or(Error::MissingDbData(format!(
@@ -100,8 +96,7 @@ pub(super) mod internal {
             .serialization_format()
             .ok_or_else(|| Error::MissingDbData("serialization_format".to_owned()))?;
 
-        let timeseries_res = context
-            .timeseries_querier
+        let timeseries_res = ts_engine
             .read(path_in_store.data_folder_path(), format, None)
             .await;
 
@@ -115,49 +110,85 @@ pub(super) mod internal {
             Err(_) => types::TimestampRange::unbounded(),
         };
 
-        let datafiles = context
-            .store
-            .list(
-                path_in_store.root(),
-                Some(&format.to_properties().as_extension()),
-            )
-            .await?;
+        Ok(timestamp_range)
+    }
 
-        let mut total_bytes = 0;
-        for file in &datafiles {
-            let meta = context
-                .store
-                .meta(file)
-                .await?
-                .ok_or(core::Error::internal(
-                    format!("File {} not found in Store", file).into(),
-                ))?;
-            total_bytes += meta.size as u64;
-        }
+    async fn time_window_info(
+        ts_engine: &query::TimeseriesEngineRef,
+        topic_record: &db::TopicRecord,
+        time_window: types::TimestampRange,
+    ) -> Result<types::TopicTimeWindowInfo> {
+        let Some(path_in_store) = &topic_record.path_in_store() else {
+            return Ok(types::TopicTimeWindowInfo {
+                row_count: 0,
+                timestamp_range: types::TimestampRange::unbounded(),
+            });
+        };
 
-        Ok(types::TopicDataInfo {
-            chunks_number: datafiles.len() as u64,
-            total_bytes,
-            timestamp_range,
+        let format = topic_record
+            .serialization_format()
+            .ok_or_else(|| Error::MissingDbData("serialization_format".to_owned()))?;
+
+        let path = path_in_store.data_folder_path();
+
+        let mut query_result = ts_engine.read(&path, format, None).await?;
+
+        query_result = query_result.filter_by_timestamp_range(time_window)?;
+
+        // Timestamp_range can be None only if there is no data uploaded for the topic yet.
+        // In that case the entire app metadata is left empty.
+        let (row_count, timestamp_range) = query_result.clone().count_and_timestamp_range().await?;
+
+        Ok(TopicTimeWindowInfo {
+            row_count: row_count as u64,
+            timestamp_range: timestamp_range.unwrap_or(types::TimestampRange::unbounded()),
         })
     }
 
-    /// Creates [`TopicMetadata`] associated to the given [`topic_record`].
+    /// Creates [`TopicInfo`] associated to the given [`topic_record`].
     pub async fn info(
         exe: &mut impl db::AsExec,
-        ts_engine: query::TimeseriesEngineRef,
+        ts_engine: &query::TimeseriesEngineRef,
         topic_record: &db::TopicRecord,
+        time_window: Option<types::TimestampRange>,
     ) -> Result<TopicInfo> {
+        let stats = db::topic_get_stats(exe, topic_record.topic_id).await?;
+
+        let ts_range = if stats.chunks_count == 0 {
+            types::TimestampRange::unbounded()
+        } else {
+            // Return an unbounded range instead of throwing an error regarding missing data in DB,
+            // because a get_flight_info read could be performed when some chunk has already been
+            // stored, but the topic is not finalized yet.
+            topic_record
+                .timestamp_range()
+                .unwrap_or(types::TimestampRange::unbounded())
+        };
+
+        let data_info = types::TopicDataInfo {
+            total_chunks: stats.chunks_count,
+            total_bytes: stats.total_size_bytes,
+            timestamp_range: ts_range,
+            total_row_count: stats.total_row_count,
+        };
+
+        let time_window_info = if let Some(time_window) = time_window {
+            Some(time_window_info(ts_engine, topic_record, time_window).await?)
+        } else {
+            None
+        };
+
         Ok(TopicInfo {
             metadata: metadata(exe, topic_record).await?,
-            data_info: topic_record.info(),
-            schema: arrow_schema(ts_engine, topic_record).await?,
+            data_info,
+            time_window_info,
         })
     }
 
     /// Returns the topic arrow schema.
     /// The serialization format is required to extract the schema.
     /// It can be retrieved using [`metadata`] function.
+    #[allow(dead_code)]
     pub async fn arrow_schema(
         ts_engine: query::TimeseriesEngineRef,
         topic_record: &db::TopicRecord,
@@ -186,8 +217,8 @@ pub(super) mod internal {
 
     /// Computes the optimal batch size based on topic statistics from the database.
     /// The computed batch size is clamped between 1 and
-    /// [`params::ConfigurablesParams::max_batch_size`], so topics whose rows are larger
-    /// than [`params::ConfigurablesParams::target_message_size`] still stream at least
+    /// [`params::Params::max_batch_size`], so topics whose rows are larger
+    /// than [`params::Params::target_message_size`] still stream at least
     /// one row per batch instead of a degenerate batch size of 0.
     ///
     /// Returns `Some(batch_size)` if statistics are available, `None` otherwise
@@ -211,11 +242,9 @@ pub(super) mod internal {
 
         let params = params::params();
 
-        let target_size = params.target_message_size.value;
-
         // Guard in case of average 0 to avoid panic
         let avg_bytes_per_row = (stats.avg_bytes_per_row as usize).max(1);
-        let batch_size = target_size / avg_bytes_per_row;
+        let batch_size = params.target_message_size / avg_bytes_per_row;
 
         Ok(batch_size.clamp(1, params.max_batch_size.value))
     }
@@ -275,11 +304,8 @@ pub async fn try_create(
         &mut tx,
         locator,
         session_uuid.clone(),
-        &ontology_metadata.properties.ontology_tag,
-        &ontology_metadata
-            .properties
-            .serialization_format
-            .to_string(),
+        &ontology_metadata.ontology_tag,
+        &ontology_metadata.serialization_format.to_string(),
         None,
         ontology_metadata.user_metadata.map(Into::into),
     )
@@ -299,7 +325,11 @@ pub async fn try_create(
 }
 
 /// Creates [`TopicInfo`] associated to the given topic [`locator`].
-pub async fn info(context: &Context, locator: &types::TopicLocator) -> Result<TopicInfo> {
+pub async fn info(
+    context: &Context,
+    locator: &types::TopicLocator,
+    time_window: Option<types::TimestampRange>,
+) -> Result<TopicInfo> {
     let mut cx = context.db.connection();
     let topic_record = db::topic_find_by_locator(&mut cx, locator)
         .await
@@ -307,7 +337,25 @@ pub async fn info(context: &Context, locator: &types::TopicLocator) -> Result<To
             db::Error::NotFound => core::Error::not_found(locator.to_string()),
             _ => e.error(),
         })?;
-    internal::info(&mut cx, context.timeseries_querier.clone(), &topic_record).await
+    internal::info(
+        &mut cx,
+        &context.timeseries_querier,
+        &topic_record,
+        time_window,
+    )
+    .await
+}
+
+/// Returns the arrow schema of the topic identified by [`locator`].
+pub async fn schema(context: &Context, locator: &types::TopicLocator) -> Result<SchemaRef> {
+    let mut cx = context.db.connection();
+    let topic_record = db::topic_find_by_locator(&mut cx, locator)
+        .await
+        .map_err(|e| match e {
+            db::Error::NotFound => core::Error::not_found(locator.to_string()),
+            _ => e.error(),
+        })?;
+    internal::arrow_schema(context.timeseries_querier.clone(), &topic_record).await
 }
 
 /// Serializes and writes [`TopicMetadata`] to the object store.
@@ -322,8 +370,8 @@ async fn metadata_write_to_store(
 ) -> Result<()> {
     trace!("writing topic metadata `{}` to store", path.display());
 
-    let json_manifest = marshal::JsonTopicMetadata::from(metadata);
-    let bytes: Vec<u8> = json_manifest.try_into()?;
+    let json_topic_metadata = marshal::JsonTopicMetadata::from(metadata);
+    let bytes: Vec<u8> = json_topic_metadata.try_into()?;
 
     context.store.write_bytes(path, bytes).await?;
 
@@ -366,8 +414,8 @@ pub async fn writer(
 
     // Set up the callback that will be used to create the database record for the data catalog
     // and prepare variables that will be moved in the closure
-    let ontology_tag = mdata.ontology_metadata.properties.ontology_tag.clone();
-    let format = mdata.ontology_metadata.properties.serialization_format;
+    let ontology_tag = mdata.ontology_metadata.ontology_tag.clone();
+    let format = mdata.ontology_metadata.serialization_format;
 
     // Create random folder for the Store.
     let path_in_store = types::TopicPathInStore::new();
@@ -594,8 +642,14 @@ impl HandleWriter {
 
         let topic_locator = topic_record.locator();
 
-        let info = internal::compute_data_info(&self.context, &topic_record).await?;
-        db::topic_update_system_info(&mut tx, &topic_locator, &info).await?;
+        // ts_range can be unbounded if only empty batches have been sent.
+        let ts_range = internal::compute_timestamp_range(
+            self.context.timeseries_querier.clone(),
+            &topic_record,
+        )
+        .await?;
+
+        db::topic_update_index_timestamp_range(&mut tx, &topic_locator, ts_range).await?;
 
         // Check if topic has already been uploaded and finalized.
         if let Status::Finalized = internal::status(&topic_record).await? {
@@ -666,13 +720,7 @@ mod tests {
     }
 
     fn dummy_ontology_metadata() -> TopicOntologyMetadata {
-        types::TopicOntologyMetadata::new(
-            types::TopicOntologyProperties {
-                ontology_tag: "dummy".to_owned(),
-                serialization_format: types::Format::Default,
-            },
-            None,
-        )
+        types::TopicOntologyMetadata::new("dummy".to_owned(), types::Format::Default, None)
     }
 
     #[sqlx::test(migrator = "db::testing::MIGRATOR")]
