@@ -187,7 +187,7 @@ class TestProfileRemove:
 
 class TestProfileList:
     def test_list_empty(self, config_file):
-        result = runner.invoke(app, ["profile", "ls"])
+        result = runner.invoke(app, ["profile", "ls", "--output", "table"])
         assert result.exit_code == 0
         assert "No profiles" in result.output
 
