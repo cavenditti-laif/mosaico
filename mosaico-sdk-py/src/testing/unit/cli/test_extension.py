@@ -90,7 +90,7 @@ class TestExtensionLsCommand:
         config = tmp_path / "cfg.toml"
         config.write_text('[dev]\nhost = "localhost"\ndefault = true\n')
         monkeypatch.setenv("MOSAICO_CONFIG_PATH", str(config))
-        result = runner.invoke(app, ["extension", "ls"])
+        result = runner.invoke(app, ["extension", "ls", "--output", "table"])
         assert result.exit_code == 0
         assert "No external extensions" in result.output
 

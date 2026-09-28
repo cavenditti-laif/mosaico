@@ -1,16 +1,23 @@
-import json
 import socket
-import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TextIO
 
 import typer
+from rich.console import Console
 from rich.table import Table
 
+from mosaicolabs_cli.output import (
+    OUTPUT_SCHEMA_VERSION,
+    OutputRenderer,
+    Record,
+    render_csv,
+    render_json,
+    render_jsonl,
+    resolve_output,
+)
+from mosaicolabs_cli.output_format import OutputFormat
 from mosaicolabs_cli.utils.config import (
-    OutputFormat,
     config_permissions,
-    console,
     get_config_path,
 )
 from mosaicolabs_cli.utils.mosaico_profile import MosaicoProfile
@@ -29,7 +36,8 @@ def _overall_status(checks: list[dict[str, str]]) -> str:
     return "ok"
 
 
-def _render_table(checks: list[dict[str, str]], overall: str) -> None:
+def _render_table(payload: Record, stream: TextIO) -> None:
+    checks, overall = payload["checks"], payload["status"]
     table = Table(
         title=f"Mosaico diagnostics: {overall}",
         header_style="bold cyan",
@@ -47,7 +55,25 @@ def _render_table(checks: list[dict[str, str]], overall: str) -> None:
             f"[{styles[status]}]{status}[/{styles[status]}]",
             check["message"],
         )
-    console.print(table)
+    Console(file=stream).print(table)
+
+
+def _render_csv(payload: Record, stream: TextIO) -> None:
+    render_csv(payload["checks"], stream, fields=("name", "status", "message"))
+
+
+def _render_jsonl(payload: Record, stream: TextIO) -> None:
+    render_jsonl(payload["checks"], stream)
+
+
+_renderer = OutputRenderer[Record](
+    {
+        OutputFormat.TABLE: _render_table,
+        OutputFormat.CSV: _render_csv,
+        OutputFormat.JSON: render_json,
+        OutputFormat.JSONL: _render_jsonl,
+    }
+)
 
 
 def doctor(
@@ -153,11 +179,9 @@ def doctor(
                 checks.append(_check("tcp", "error", str(exc)))
 
     overall = _overall_status(checks)
-    selected_output = output or (
-        OutputFormat.TABLE if sys.stdout.isatty() else OutputFormat.JSON
-    )
+    selected_output = resolve_output(output, piped=OutputFormat.JSON)
     payload = {
-        "schema_version": 1,
+        "schema_version": OUTPUT_SCHEMA_VERSION,
         "status": overall,
         "profile": {
             "name": profile.name if profile else "",
@@ -169,16 +193,7 @@ def doctor(
         "checks": checks,
     }
 
-    if selected_output == OutputFormat.TABLE:
-        _render_table(checks, overall)
-    elif selected_output == OutputFormat.CSV:
-        for check in checks:
-            print(f"{check['name']},{check['status']},{json.dumps(check['message'])}")
-    elif selected_output == OutputFormat.JSONL:
-        for check in checks:
-            print(json.dumps(check, sort_keys=True))
-    else:
-        print(json.dumps(payload, sort_keys=True))
+    _renderer.render(payload, selected_output)
 
     if overall == "error":
         raise typer.Exit(code=1)
