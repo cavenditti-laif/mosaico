@@ -45,7 +45,7 @@ dev = [
 ]
 
 [tool.uv]
-required-version = ">=0.11.23"
+required-version = ">=0.13.1"
 
 [tool.uv.build-backend]
 module-name = ["mosaicolabs", "mosaicolabs_cli"]
@@ -79,7 +79,7 @@ combine-as-imports = true
 # Since you're using rosbags, relying on its abilities to read ROS messages is the standard approach.
 
 [build-system]
-requires = ["uv_build>=0.11.23,<0.12.0"]
+requires = ["uv_build>=0.13.1,<0.14.0"]
 build-backend = "uv_build"
 
 [project.scripts]

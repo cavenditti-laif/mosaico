@@ -38,7 +38,7 @@ The backend (`mosaicod`), Python SDK (`mosaico-sdk-py`), and documentation (`doc
 
 ### Python SDK setup
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) 0.11.23 or newer, then run from the repository root:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) 0.13.1 or newer, then run from the repository root:
 
 ```bash
 cd mosaico-sdk-py
